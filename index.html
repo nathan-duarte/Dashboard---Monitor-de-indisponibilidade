@@ -1,0 +1,323 @@
+<!--
+Dashboard simples em um único arquivo HTML/CSS/JS para monitorar disponibilidade
+Baseado no seu script Python que simula indisponibilidade.
+
+Como usar:
+- Ideal: exponha seu script Python como uma API REST em /api/simulate?url=<URL>&attempts=<N>&wait=<S>
+  que retorne JSON no formato:
+    {"status":"ok"|"fail","code":200,"attempt":1,"message":"...","rtt_ms":123}
+
+- Caso não haja backend disponível, o dashboard fará uma simulação local (mesma lógica aleatória).
+
+Este arquivo contém:
+- input para URL e configurações
+- botão para "Testar agora"
+- botão para iniciar/pausar polling automático
+- histórico de tentativas
+- gráfico simples em canvas (linha de resposta / falhas)
+- exportar histórico (JSON)
+-->
+
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dashboard — Monitor de Indisponibilidade</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--muted:#94a3b8;--good:#10b981;--bad:#ef4444}
+    *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    body{margin:0;background:linear-gradient(180deg,#071021 0%, #071525 100%);color:#e6eef7;padding:24px}
+    .wrap{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:1fr 360px;gap:20px}
+    header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between}
+    h1{margin:0;font-size:20px}
+    .card{background:var(--card);padding:18px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    input[type=text], input[type=number], select{background:#071828;border:1px solid rgba(255,255,255,0.04);padding:10px;border-radius:8px;color:inherit}
+    button{background:var(--accent);border:none;padding:10px 12px;border-radius:10px;color:#012;cursor:pointer;font-weight:600}
+    button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+    .status{display:flex;align-items:center;gap:12px}
+    .pill{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,0.03);font-weight:700}
+    .status-dot{width:12px;height:12px;border-radius:999px;display:inline-block}
+    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+    .stat{background:rgba(255,255,255,0.02);padding:10px;border-radius:10px;text-align:center}
+    .history{max-height:420px;overflow:auto;margin-top:12px}
+    .item{display:flex;justify-content:space-between;padding:8px;border-bottom:1px dashed rgba(255,255,255,0.03);font-size:13px}
+    canvas{width:100%;height:160px;background:linear-gradient(180deg, rgba(6,22,34,0.4), rgba(6,22,34,0.15));border-radius:8px}
+    footer{grid-column:1/-1;margin-top:14px;color:var(--muted);font-size:13px}
+    .small{font-size:12px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Dashboard — Monitor de Indisponibilidade</h1>
+      <div class="small">Baseado no seu script Python • Frontend estático</div>
+    </header>
+
+    <section class="card">
+      <div style="display:flex;gap:12px;align-items:center;justify-content:space-between;">
+        <div style="flex:1">
+          <label class="small">URL alvo</label>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <input id="urlInput" type="text" value="https://www.google.com" placeholder="https://exemplo.com/api/health" />
+            <select id="attemptsSelect">
+              <option value="1">1 tentativa</option>
+              <option value="3" selected>3 tentativas</option>
+              <option value="5">5 tentativas</option>
+            </select>
+            <input id="waitInput" type="number" min="1" value="3" style="width:78px" />
+            <button id="testBtn">Testar agora</button>
+            <button id="autoBtn" class="ghost">Iniciar polling</button>
+          </div>
+          <div class="stats" style="margin-top:12px">
+            <div class="stat">
+              <div class="small">Último status</div>
+              <div id="lastStatus" style="margin-top:6px" class="pill">—</div>
+            </div>
+            <div class="stat">
+              <div class="small">Sucesso (%)</div>
+              <div id="successPct" style="margin-top:6px" class="pill">—</div>
+            </div>
+            <div class="stat">
+              <div class="small">RTT médio (ms)</div>
+              <div id="avgRtt" style="margin-top:6px" class="pill">—</div>
+            </div>
+          </div>
+        </div>
+        <div style="width:320px">
+          <canvas id="chart"></canvas>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button id="clearBtn" class="ghost">Limpar histórico</button>
+            <button id="exportBtn" class="ghost">Exportar JSON</button>
+            <button id="mockBtn" class="ghost">Forçar simulação local</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="history" id="history"></div>
+    </section>
+
+    <aside class="card">
+      <div class="small">Configurações & Log</div>
+      <div style="margin-top:10px">
+        <div class="status">
+          <div class="pill">Polling: <span id="pollState">PAUSADO</span></div>
+          <div class="pill">Intervalo (s): <span id="pollInterval">10</span></div>
+        </div>
+        <div style="margin-top:12px">
+          <label class="small">Console</label>
+          <div id="console" style="background:#06101a;padding:10px;border-radius:8px;margin-top:6px;max-height:300px;overflow:auto;font-size:13px;color:var(--muted)"></div>
+        </div>
+      </div>
+    </aside>
+
+    <footer>
+      Dica: exponha seu script Python como uma API para integrá-lo — caso contrário o dashboard usará a simulação local.
+    </footer>
+  </div>
+
+  <script>
+    // ---------- helpers ----------
+    const $ = id => document.getElementById(id)
+    const log = msg => { const el=$('console'); el.innerText = new Date().toLocaleTimeString() + ' — ' + msg + '\n' + el.innerText }
+
+    // ---------- estado ----------
+    let history = JSON.parse(localStorage.getItem('dash_history')||'[]')
+    let autoPolling = false
+    let pollTimer = null
+    let useLocalMock = false
+
+    // Inicialização do DOM
+    const historyEl = $('history')
+    const chartCanvas = $('chart')
+    const ctx = chartCanvas.getContext('2d')
+
+    function renderHistory(){
+      historyEl.innerHTML = ''
+      history.slice().reverse().forEach(h=>{
+        const div = document.createElement('div')
+        div.className='item'
+        const left = document.createElement('div')
+        left.innerHTML = `<div style="font-weight:700">${h.url}</div><div class="small">Tentativa ${h.attempt}/${h.attempts} • ${new Date(h.ts).toLocaleString()}</div>`
+        const right = document.createElement('div')
+        right.style.textAlign='right'
+        right.innerHTML = `<div>${h.status=='ok'?'<span style="color:var(--good)">ONLINE</span>':'<span style="color:var(--bad)">OFFLINE</span>'}</div><div class="small">RTT: ${h.rtt_ms??'—'}</div>`
+        div.appendChild(left); div.appendChild(right); historyEl.appendChild(div)
+      })
+      localStorage.setItem('dash_history', JSON.stringify(history))
+      renderStats()
+      drawChart()
+    }
+
+    function renderStats(){
+      const last = history[history.length-1]
+      $('lastStatus').innerText = last ? (last.status=='ok' ? 'ONLINE' : 'OFFLINE') : '—'
+      const successCount = history.filter(h=>h.status=='ok').length
+      $('successPct').innerText = history.length ? Math.round((successCount/history.length)*100) + '%' : '—'
+      const rtts = history.filter(h=>h.rtt_ms).map(h=>h.rtt_ms)
+      const avg = rtts.length ? Math.round(rtts.reduce((a,b)=>a+b,0)/rtts.length) : '—'
+      $('avgRtt').innerText = avg
+    }
+
+    // Desenha um gráfico simples de linha (rtt / falha)
+    function drawChart(){
+      const w = chartCanvas.width = chartCanvas.clientWidth
+      const h = chartCanvas.height = 160
+      ctx.clearRect(0,0,w,h)
+
+      // eixo
+      ctx.globalAlpha = 0.12
+      for(let y=0;y<5;y++){
+        ctx.fillStyle='white'
+        ctx.fillRect(0,(h/5)*y,w,1)
+      }
+      ctx.globalAlpha = 1
+
+      const lastN = history.slice(-20)
+      if(!lastN.length) return
+      const maxRtt = Math.max(...lastN.map(x=>x.rtt_ms||0), 200)
+      const step = w/lastN.length
+
+      ctx.beginPath()
+      for(let i=0;i<lastN.length;i++){
+        const v = lastN[i].rtt_ms || 0
+        const x = i*step + step/2
+        const y = h - (v/maxRtt)* (h-20) - 10
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y)
+      }
+      ctx.strokeStyle='rgba(6,182,212,0.9)'
+      ctx.lineWidth=2
+      ctx.stroke()
+
+      // pontos
+      for(let i=0;i<lastN.length;i++){
+        const v = lastN[i].rtt_ms || 0
+        const x = i*step + step/2
+        const y = h - (v/maxRtt)*(h-20) - 10
+        ctx.beginPath()
+        ctx.arc(x,y,4,0,Math.PI*2)
+        ctx.fillStyle = lastN[i].status=='ok' ? 'rgba(16,185,129,0.95)' : 'rgba(239,68,68,0.95)'
+        ctx.fill()
+      }
+    }
+
+    // ---------- simulação local (fallback) ----------
+    function localSimulate(url, attempts=3, wait=2){
+      return new Promise(async (resolve)=>{
+        for(let attempt=1; attempt<=attempts; attempt++){
+          log(`(local) Tentativa ${attempt}/${attempts} -> ${url}`)
+          // 40% chance de falha
+          if(Math.random() < 0.4){
+            await new Promise(r=>setTimeout(r, wait*1000))
+            if(attempt===attempts){
+              resolve({status:'fail',attempt,attempts,code:null,message:'simulada',rtt_ms:null,url,ts:Date.now()})
+              return
+            }
+            continue
+          }
+          // simula rtt
+          const rtt = Math.round(50 + Math.random()*250)
+          await new Promise(r=>setTimeout(r, Math.min(500, rtt)))
+          resolve({status:'ok',attempt,attempts,code:200,message:'simulada ok',rtt_ms:rtt,url,ts:Date.now()})
+          return
+        }
+      })
+    }
+
+    // ---------- integração com backend (se existir) ----------
+    async function callBackend(url, attempts, wait){
+      try{
+        const apiUrl = `/api/simulate?url=${encodeURIComponent(url)}&attempts=${attempts}&wait=${wait}`
+        const t0 = performance.now()
+        const resp = await fetch(apiUrl, {method:'GET'})
+        const t1 = performance.now()
+        if(!resp.ok) throw new Error('HTTP '+resp.status)
+        const data = await resp.json()
+        // espera-se que backend retorne objeto com ao menos {status, attempt, attempts, rtt_ms, code}
+        data.rtt_ms = data.rtt_ms || Math.round(t1-t0)
+        data.url = url
+        data.ts = Date.now()
+        return data
+      }catch(err){
+        log('Erro ao chamar backend: '+err.message)
+        return null
+      }
+    }
+
+    // ---------- operação principal ----------
+    async function runCheck(){
+      const url = $('urlInput').value.trim()
+      const attempts = parseInt($('attemptsSelect').value)
+      const wait = parseInt($('waitInput').value)
+      if(!url) return alert('Informe a URL')
+
+      $('testBtn').disabled = true
+      let result = null
+
+      if(!useLocalMock){
+        result = await callBackend(url, attempts, wait)
+      }
+
+      if(!result){
+        result = await localSimulate(url, attempts, wait)
+      }
+
+      history.push(result)
+      renderHistory()
+      log(`Resultado: ${result.status.toUpperCase()} — tentativa ${result.attempt}/${result.attempts}`)
+      $('testBtn').disabled = false
+      return result
+    }
+
+    // ---------- polling automático ----------
+    function startPolling(){
+      if(autoPolling) return
+      autoPolling = true
+      $('autoBtn').innerText = 'Parar polling'
+      $('autoBtn').classList.remove('ghost')
+      $('pollState').innerText = 'ATIVO'
+      const interval = parseInt($('pollInterval').innerText) || 10
+      pollTimer = setInterval(()=> runCheck().catch(e=>log('poll erro: '+e.message)), interval*1000)
+      // executa imediatamente
+      runCheck()
+    }
+    function stopPolling(){
+      autoPolling = false
+      $('autoBtn').innerText = 'Iniciar polling'
+      $('autoBtn').classList.add('ghost')
+      $('pollState').innerText = 'PAUSADO'
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+
+    // ---------- eventos UI ----------
+    $('testBtn').addEventListener('click', runCheck)
+    $('autoBtn').addEventListener('click', ()=>{
+      const was = autoPolling
+      if(was) stopPolling(); else startPolling()
+    })
+    $('clearBtn').addEventListener('click', ()=>{ history = []; renderHistory(); log('Histórico limpo') })
+    $('exportBtn').addEventListener('click', ()=>{
+      const blob = new Blob([JSON.stringify(history, null,2)], {type:'application/json'})
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a'); a.href = url; a.download = 'dash_history.json'; a.click(); URL.revokeObjectURL(url)
+    })
+    $('mockBtn').addEventListener('click', ()=>{ useLocalMock = !useLocalMock; $('mockBtn').innerText = useLocalMock ? 'Simulação local: ON' : 'Forçar simulação local'; log('Simulação local ' + (useLocalMock? 'ativada':'desativada')) })
+
+    // ajuste do intervalo exibido (controla somente texto) — o real setInterval usa 10s por padrão; você pode adaptar
+    document.addEventListener('keydown', (e)=>{
+      if(e.key==='+') $('pollInterval').innerText = Math.max(1, parseInt($('pollInterval').innerText)-1)
+      if(e.key==='-') $('pollInterval').innerText = Math.min(60, parseInt($('pollInterval').innerText)+1)
+    })
+
+    // render inicial
+    renderHistory()
+    log('Dashboard carregado')
+
+    // responsivo: redesenha o gráfico quando a tela mudar
+    let resizeTO = null
+    window.addEventListener('resize', ()=>{ clearTimeout(resizeTO); resizeTO = setTimeout(drawChart, 200) })
+  </script>
+</body>
+</html>
